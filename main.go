@@ -1,31 +1,47 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
 	"log"
 	"net/http"
+	"os"
+	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+
+	"github.com/debobrad579/chirpy/internal/database"
 )
+
+type apiConfig struct {
+	fileserverHits atomic.Int32
+	db             database.Queries
+}
+
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (cfg *apiConfig) resetHits() {
+	cfg.fileserverHits.Store(0)
+}
 
 const (
 	port         = "8080"
 	filepathRoot = "."
 )
 
-func respondWithError(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(map[string]string{"error": msg}); err != nil {
-		log.Printf("Error encoding response: %s", err)
-	}
-}
-
-func respondWithJSON(w http.ResponseWriter, code int, payload any) {
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("Error encoding response: %s", err)
-	}
-}
-
 func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal("Failed to open database")
+	}
+
 	mux := http.NewServeMux()
 
 	srv := &http.Server{
@@ -33,10 +49,10 @@ func main() {
 		Addr:    ":" + port,
 	}
 
-	cfg := &apiConfig{}
+	cfg := &apiConfig{db: *database.New(db)}
 
 	mux.Handle("/app/", http.StripPrefix("/app", cfg.middlewareMetricsInc(http.FileServer(http.Dir(filepathRoot)))))
-	mux.Handle("/api/", http.StripPrefix("/api", apiMux()))
+	mux.Handle("/api/", http.StripPrefix("/api", apiMux(cfg)))
 	mux.Handle("/admin/", http.StripPrefix("/admin", adminMux(cfg)))
 
 	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)

@@ -3,26 +3,11 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"sync/atomic"
 )
-
-type apiConfig struct {
-	fileserverHits atomic.Int32
-}
-
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (cfg *apiConfig) resetHits() {
-	cfg.fileserverHits.Store(0)
-}
 
 func adminMux(cfg *apiConfig) *http.ServeMux {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
@@ -35,9 +20,16 @@ func adminMux(cfg *apiConfig) *http.ServeMux {
 			</html>
 		`, cfg.fileserverHits.Load())
 	})
+
 	mux.HandleFunc("POST /reset", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		cfg.resetHits()
+
+		if err := cfg.db.DeleteAllUsers(r.Context()); err != nil {
+			http.Error(w, "Failed to delete all users", http.StatusInternalServerError)
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "OK")
 	})
