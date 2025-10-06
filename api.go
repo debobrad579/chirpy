@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
-	"github.com/debobrad579/chirpy/internal/database"
 	"github.com/google/uuid"
+
+	"github.com/debobrad579/chirpy/internal/auth"
+	"github.com/debobrad579/chirpy/internal/database"
 )
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -40,13 +43,25 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 
 	mux.HandleFunc("POST /chirps", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
-			Body   string    `json:"body"`
-			UserId uuid.UUID `json:"user_id"`
+			Body string `json:"body"`
 		}
 
 		var params parameters
 		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			respondWithError(w, http.StatusBadRequest, "Unauthorized")
+			return
+		}
+
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 
@@ -74,7 +89,7 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 
 		cleanedBody := strings.Join(newWords, " ")
 
-		chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{Body: cleanedBody, UserID: params.UserId})
+		chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{Body: cleanedBody, UserID: userID})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to create chirp")
 			return
@@ -115,7 +130,8 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 
 	mux.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
 		}
 
 		var params parameters
@@ -124,13 +140,137 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 			return
 		}
 
-		user, err := cfg.db.CreateUser(r.Context(), params.Email)
+		hashedPassword, err := auth.HashPassword(params.Password)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+			return
+		}
+
+		user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{Email: params.Email, HashedPassword: hashedPassword})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed creating user")
 			return
 		}
 
 		respondWithJSON(w, http.StatusCreated, user)
+	})
+
+	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
+		type parameters struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		type returnVals struct {
+			ID           uuid.UUID `json:"id"`
+			CreatedAt    time.Time `json:"created_at"`
+			UpdatedAt    time.Time `json:"updated_at"`
+			Email        string    `json:"email"`
+			Token        string    `json:"token"`
+			RefreshToken string    `json:"refresh_token"`
+		}
+
+		var params parameters
+		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		user, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				respondWithError(w, http.StatusUnauthorized, "Email or password is incorrect")
+				return
+			}
+			respondWithError(w, http.StatusInternalServerError, "Failed to get user")
+			return
+		}
+
+		ok, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to check password hash")
+			return
+		}
+
+		if !ok {
+			respondWithError(w, http.StatusUnauthorized, "Email or password is incorrect")
+			return
+		}
+
+		token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, 1*time.Hour)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to create access token")
+			return
+		}
+
+		refreshTokenString, err := auth.MakeRefreshToken()
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to create refresh token")
+			return
+		}
+
+		refreshToken, err := cfg.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{Token: refreshTokenString, UserID: user.ID, ExpiresAt: time.Now().Add(60 * 24 * time.Hour)})
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to create refresh token")
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, returnVals{user.ID, user.CreatedAt, user.UpdatedAt, user.Email, token, refreshToken.Token})
+	})
+
+	mux.HandleFunc("POST /refresh", func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid authorization header")
+			return
+		}
+
+		type returnVals struct {
+			Token string `json:"token"`
+		}
+
+		refreshToken, err := cfg.db.GetRefreshToken(r.Context(), token)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				respondWithError(w, http.StatusUnauthorized, "Invalid refresh token")
+				return
+			}
+			respondWithError(w, http.StatusInternalServerError, "Failed to get refresh token")
+			return
+		}
+
+		if refreshToken.ExpiresAt.Before(time.Now()) || refreshToken.RevokedAt.Valid {
+			respondWithError(w, http.StatusUnauthorized, "Invalid refresh token")
+			return
+		}
+
+		accessToken, err := auth.MakeJWT(refreshToken.UserID, cfg.tokenSecret, 1*time.Hour)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to create access token")
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, returnVals{accessToken})
+	})
+
+	mux.HandleFunc("POST /revoke", func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid authorization header")
+			return
+		}
+
+		if err := cfg.db.RevokeRefreshToken(r.Context(), token); err != nil {
+			if err == sql.ErrNoRows {
+				respondWithError(w, http.StatusUnauthorized, "Invalid refresh token")
+				return
+			}
+			respondWithError(w, http.StatusInternalServerError, "Failed revoking refresh token")
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	return mux

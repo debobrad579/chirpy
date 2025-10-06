@@ -25,6 +25,10 @@ func adminMux(cfg *apiConfig) *http.ServeMux {
 		w.Header().Set("Content-Type", "text/plain")
 		cfg.resetHits()
 
+		if cfg.platform != "dev" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		}
+
 		if err := cfg.db.DeleteAllUsers(r.Context()); err != nil {
 			http.Error(w, "Failed to delete all users", http.StatusInternalServerError)
 			return
