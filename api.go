@@ -46,22 +46,15 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 			Body string `json:"body"`
 		}
 
+		userID, err := auth.AuthenticateUser(r.Header, cfg.tokenSecret)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
 		var params parameters
 		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Unauthorized")
-			return
-		}
-
-		token, err := auth.GetBearerToken(r.Header)
-		if err != nil {
-			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
-			return
-		}
-
-		userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
-
-		if err != nil {
-			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 
@@ -128,6 +121,42 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 		respondWithJSON(w, http.StatusOK, chirp)
 	})
 
+	mux.HandleFunc("DELETE /chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
+		chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "chirpID is not a uuid")
+			return
+		}
+
+		chirp, err := cfg.db.GetChirp(r.Context(), chirpID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				respondWithError(w, http.StatusNotFound, "Chirp not found")
+				return
+			}
+			respondWithError(w, http.StatusInternalServerError, "Failed to get chirp")
+			return
+		}
+
+		userID, err := auth.AuthenticateUser(r.Header, cfg.tokenSecret)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		if userID != chirp.UserID {
+			respondWithError(w, http.StatusForbidden, "Forbidden")
+			return
+		}
+
+		if err := cfg.db.DeleteChirp(r.Context(), chirp.ID); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed deleting chirp")
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Email    string `json:"email"`
@@ -153,6 +182,38 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 		}
 
 		respondWithJSON(w, http.StatusCreated, user)
+	})
+
+	mux.HandleFunc("PUT /users", func(w http.ResponseWriter, r *http.Request) {
+		type parameters struct {
+			Email    string
+			Password string
+		}
+
+		userID, err := auth.AuthenticateUser(r.Header, cfg.tokenSecret)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		var params parameters
+		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+		}
+
+		hashedPassword, err := auth.HashPassword(params.Password)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+			return
+		}
+
+		user, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{ID: userID, Email: params.Email, HashedPassword: hashedPassword})
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to update user")
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, user)
 	})
 
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {

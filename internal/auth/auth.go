@@ -66,3 +66,17 @@ func MakeRefreshToken() (string, error) {
 
 	return hex.EncodeToString(token), nil
 }
+
+func AuthenticateUser(headers http.Header, secret string) (uuid.UUID, error) {
+	token, err := GetBearerToken(headers)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	userID, err := ValidateJWT(token, secret)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	return userID, nil
+}
