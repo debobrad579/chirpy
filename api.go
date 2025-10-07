@@ -92,8 +92,40 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 	})
 
 	mux.HandleFunc("GET /chirps", func(w http.ResponseWriter, r *http.Request) {
-		chirps, err := cfg.db.GetChirps(r.Context())
+		sort := r.URL.Query().Get("sort")
+		if sort == "" {
+			sort = "asc"
+		}
+		if sort != "asc" && sort != "desc" {
+			respondWithError(w, http.StatusBadRequest, "Invalid sort query param")
+			return
+		}
+
+		authorIDString := r.URL.Query().Get("author_id")
+		if authorIDString == "" {
+			chirps, err := cfg.db.GetChirps(r.Context(), sort)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to get chirps")
+				return
+			}
+
+			respondWithJSON(w, http.StatusOK, chirps)
+			return
+		}
+
+		authorID, err := uuid.Parse(authorIDString)
 		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Failed to parse authorID")
+			return
+		}
+
+		chirps, err := cfg.db.GetChirpsFromAuthor(r.Context(), database.GetChirpsFromAuthorParams{UserID: authorID, Column2: sort})
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				respondWithError(w, http.StatusNotFound, "Invalid authorID")
+				return
+			}
 			respondWithError(w, http.StatusInternalServerError, "Failed to get chirps")
 			return
 		}

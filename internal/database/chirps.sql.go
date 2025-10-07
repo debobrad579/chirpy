@@ -74,11 +74,66 @@ SELECT
 FROM
     chirps
 ORDER BY
-    created_at
+    CASE WHEN $1 = 'asc' THEN
+        created_at
+    END ASC,
+    CASE WHEN $1 = 'desc' THEN
+        created_at
+    END DESC
 `
 
-func (q *Queries) GetChirps(ctx context.Context) ([]Chirp, error) {
-	rows, err := q.db.QueryContext(ctx, getChirps)
+func (q *Queries) GetChirps(ctx context.Context, dollar_1 interface{}) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, getChirps, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Chirp
+	for rows.Next() {
+		var i Chirp
+		if err := rows.Scan(
+			&i.ID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Body,
+			&i.UserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getChirpsFromAuthor = `-- name: GetChirpsFromAuthor :many
+SELECT
+    id, created_at, updated_at, body, user_id
+FROM
+    chirps
+WHERE
+    user_id = $1
+ORDER BY
+    CASE WHEN $2 = 'asc' THEN
+        created_at
+    END ASC,
+    CASE WHEN $2 = 'desc' THEN
+        created_at
+    END DESC
+`
+
+type GetChirpsFromAuthorParams struct {
+	UserID  uuid.UUID   `json:"user_id"`
+	Column2 interface{} `json:"column_2"`
+}
+
+func (q *Queries) GetChirpsFromAuthor(ctx context.Context, arg GetChirpsFromAuthorParams) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, getChirpsFromAuthor, arg.UserID, arg.Column2)
 	if err != nil {
 		return nil, err
 	}
