@@ -80,3 +80,12 @@ func AuthenticateUser(headers http.Header, secret string) (uuid.UUID, error) {
 
 	return userID, nil
 }
+
+func GetAPIKey(headers http.Header) (string, error) {
+	auth := headers.Get("Authorization")
+	if auth == "" {
+		return "", errors.New("No authorization header")
+	}
+
+	return strings.TrimPrefix(auth, "ApiKey "), nil
+}

@@ -227,6 +227,7 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 			CreatedAt    time.Time `json:"created_at"`
 			UpdatedAt    time.Time `json:"updated_at"`
 			Email        string    `json:"email"`
+			IsChirpyRed  bool      `json:"is_chirpy_red"`
 			Token        string    `json:"token"`
 			RefreshToken string    `json:"refresh_token"`
 		}
@@ -277,7 +278,7 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 			return
 		}
 
-		respondWithJSON(w, http.StatusOK, returnVals{user.ID, user.CreatedAt, user.UpdatedAt, user.Email, token, refreshToken.Token})
+		respondWithJSON(w, http.StatusOK, returnVals{user.ID, user.CreatedAt, user.UpdatedAt, user.Email, user.IsChirpyRed, token, refreshToken.Token})
 	})
 
 	mux.HandleFunc("POST /refresh", func(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +329,49 @@ func apiMux(cfg *apiConfig) *http.ServeMux {
 				return
 			}
 			respondWithError(w, http.StatusInternalServerError, "Failed revoking refresh token")
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /polka/webhooks", func(w http.ResponseWriter, r *http.Request) {
+		type parameters struct {
+			Event string `json:"event"`
+			Data  struct {
+				UserID string `json:"user_id"`
+			} `json:"data"`
+		}
+
+		polkaKey, err := auth.GetAPIKey(r.Header)
+		if err != nil || polkaKey != cfg.polkaKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		var params parameters
+		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if params.Event != "user.upgraded" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		userID, err := uuid.Parse(params.Data.UserID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if err := cfg.db.UpgradeUser(r.Context(), userID); err != nil {
+			if err == sql.ErrNoRows {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
